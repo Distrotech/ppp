@@ -19,7 +19,7 @@
  */
 
 #ifndef lint
-static char rcsid[] = "$Id: sys-str.c,v 1.20 1995/05/01 00:26:22 paulus Exp $";
+static char rcsid[] = "$Id: sys-str.c,v 1.20.2.1 1995/06/01 07:01:42 paulus Exp $";
 #endif
 
 /*
@@ -65,8 +65,14 @@ static int	str_module_count = 0;
 static int	pushed_ppp;
 static int	closed_stdio;
 
+static int	ppp_fd = -1;	/* fd currently attached to ppp unit */
+
 static int	restore_term;	/* 1 => we've munged the terminal */
 static struct termios inittermios; /* Initial TTY termios */
+
+static int loop_slave = -1;
+static int loop_master;
+static char loop_name[20];
 
 int sockfd;			/* socket for doing interface ioctls */
 static char *lock_file;		/* lock file created for serial port */
@@ -146,19 +152,22 @@ ppp_available()
 
 
 /*
- * establish_ppp - Turn the serial port into a ppp interface.
+ * establish_ppp - Turn the serial port (or loopback) into a ppp interface.
  */
 void
 establish_ppp()
 {
-    /* go through and save the name of all the modules, then pop em */
-    for (;;) { 
-	if (ioctl(fd, I_LOOK, str_modules[str_module_count].modname) < 0 ||
-	    ioctl(fd, I_POP, 0) < 0)
-	    break;
-	MAINDEBUG((LOG_DEBUG, "popped stream module : %s",
-		   str_modules[str_module_count].modname));
-	str_module_count++;
+    if (fd != loop_slave) {
+	str_module_count = 0;
+	/* go through and save the name of all the modules, then pop em */
+	for (;;) { 
+	    if (ioctl(fd, I_LOOK, str_modules[str_module_count].modname) < 0 ||
+		ioctl(fd, I_POP, 0) < 0)
+		break;
+	    MAINDEBUG((LOG_DEBUG, "popped stream module : %s",
+		       str_modules[str_module_count].modname));
+	    str_module_count++;
+	}
     }
 
     /* now push the async/fcs module */
@@ -167,7 +176,7 @@ establish_ppp()
 	die(1);
     }
     /* push the compress module */
-    if (ioctl(fd, I_PUSH, "pppcomp") < 0) {
+    if (fd != loop_slave && ioctl(fd, I_PUSH, "pppcomp") < 0) {
 	syslog(LOG_WARNING, "ioctl(I_PUSH, ppp_comp): %m");
     }
     /* finally, push the ppp_if module that actually handles the */
@@ -177,6 +186,7 @@ establish_ppp()
 	die(1);
     }
     pushed_ppp = 1;
+
     /* read mode, message non-discard mode */
     if (ioctl(fd, I_SRDOPT, RMSGN) < 0) {
 	syslog(LOG_ERR, "ioctl(I_SRDOPT, RMSGN): %m");
@@ -196,6 +206,8 @@ establish_ppp()
 	syslog(LOG_ERR, "ioctl(SIOCSIFDEBUG): %m");
     }
 
+    ppp_fd = fd;
+
     /* close stdin, stdout, stderr if they might refer to the device */
     if (default_device && !closed_stdio) {
 	int i;
@@ -208,16 +220,93 @@ establish_ppp()
 }
 
 /*
+ * transfer_ppp - make the device on fd `fd' take over the PPP interface
+ * unit that we are using.
+ */
+void
+transfer_ppp(fd)
+    int fd;
+{
+    if (fd == ppp_fd)
+	return;			/* we can't get here */
+
+    if (fd != loop_slave) {
+	/* go through and save the name of all the modules, then pop em */
+	str_module_count = 0;
+	for (;;) { 
+	    if (ioctl(fd, I_LOOK, str_modules[str_module_count].modname) < 0 ||
+		ioctl(fd, I_POP, 0) < 0)
+		break;
+	    MAINDEBUG((LOG_DEBUG, "popped stream module : %s",
+		       str_modules[str_module_count].modname));
+	    str_module_count++;
+	}
+    }
+
+    /* now push the async/fcs module */
+    if (ioctl(fd, I_PUSH, "pppasync") < 0) {
+	syslog(LOG_ERR, "ioctl(I_PUSH, ppp_async): %m");
+	die(1);
+    }
+    /* push the compress module */
+    if (ioctl(fd, I_PUSH, "pppcomp") < 0) {
+	syslog(LOG_WARNING, "ioctl(I_PUSH, ppp_comp): %m");
+    }
+    /* finally, push the ppp_if module that actually handles the */
+    /* network interface */ 
+    if (ioctl(fd, I_PUSH, "pppif") < 0) {
+	syslog(LOG_ERR, "ioctl(I_PUSH, ppp_if): %m");
+	die(1);
+    }
+    pushed_ppp = 1;
+
+    /* read mode, message non-discard mode */
+    if (ioctl(fd, I_SRDOPT, RMSGN) < 0) {
+	syslog(LOG_ERR, "ioctl(I_SRDOPT, RMSGN): %m");
+	die(1);
+    }
+    /*
+     * Connect to the interface unit we want.
+     * (ppp_if handles this ioctl)
+     */
+    if (ioctl(fd, SIOCSETU, &ifunit) < 0) {
+	syslog(LOG_ERR, "ioctl(SIOCSETU): %m");
+	die(1);
+    }
+
+    /* Set debug flags in driver */
+    if (ioctl(fd, SIOCSIFDEBUG, &kdebugflag) < 0) {
+	syslog(LOG_ERR, "ioctl(SIOCSIFDEBUG): %m");
+    }
+
+    /*
+     * Pop the modules off the old ppp stream, and restore
+     * the modules that were there, if this is the real serial port.
+     */
+    while (ioctl(ppp_fd, I_POP, 0) == 0)	/* pop any we pushed */
+	;
+    if (fd == loop_slave) {
+	for (; str_module_count > 0; str_module_count--) {
+	    if (ioctl(ppp_fd, I_PUSH, str_modules[str_module_count-1].modname)) {
+		if (errno != ENXIO)
+		    syslog(LOG_WARNING,
+			   "Couldn't restore STREAMS module %s: %m",
+			   str_modules[str_module_count-1].modname);
+	    }
+	}
+    }
+    ppp_fd = fd;
+}
+
+/*
  * disestablish_ppp - Restore the serial port to normal operation.
  * It attempts to reconstruct the stream with the previously popped
  * modules.  This shouldn't call die() because it's called from die().
  */
 void
-disestablish_ppp()
+disestablish_ppp(fd)
+    int fd;
 {
-    int flags;
-    char *s;
-
     if (hungup) {
 	/* we can't push or pop modules after the stream has hung up */
 	str_module_count = 0;
@@ -225,49 +314,55 @@ disestablish_ppp()
 	return;
     }
 
-    if (pushed_ppp) {
-	/*
-	 * Check whether the link seems not to be 8-bit clean.
-	 */
-	if (ioctl(fd, SIOCGIFDEBUG, (caddr_t) &flags) == 0) {
-	    s = NULL;
-	    switch (~flags & PAI_FLAGS_HIBITS) {
-	    case PAI_FLAGS_B7_0:
-		s = "bit 7 set to 1";
-		break;
-	    case PAI_FLAGS_B7_1:
-		s = "bit 7 set to 0";
-		break;
-	    case PAI_FLAGS_PAR_EVEN:
-		s = "odd parity";
-		break;
-	    case PAI_FLAGS_PAR_ODD:
-		s = "even parity";
-		break;
-	    }
-	    if (s != NULL) {
-		syslog(LOG_WARNING, "Serial link is not 8-bit clean:");
-		syslog(LOG_WARNING, "All received characters had %s", s);
-	    }
-	}
-
+    if (fd == ppp_fd && fd >= 0 && pushed_ppp) {
 	while (ioctl(fd, I_POP, 0) == 0)	/* pop any we pushed */
 	    ;
+	pushed_ppp = 0;
   
 	for (; str_module_count > 0; str_module_count--) {
 	    if (ioctl(fd, I_PUSH, str_modules[str_module_count-1].modname)) {
 		if (errno != ENXIO)
-		    syslog(LOG_WARNING, "Couldn't restore module %s: %m",
+		    syslog(LOG_WARNING,
+			   "Couldn't restore STREAMS module %s: %m",
 			   str_modules[str_module_count-1].modname);
-	    } else {
-		MAINDEBUG((LOG_INFO, "str_restore: pushed module %s",
-			   str_modules[str_module_count-1].modname));
 	    }
 	}
+	ppp_fd = -1;
 	pushed_ppp = 0;
     }
 }
 
+/*
+ * Check whether the link seems not to be 8-bit clean.
+ */
+void
+clean_check()
+{
+    int flags;
+    char *s;
+
+    if (ioctl(ppp_fd, SIOCGIFDEBUG, (caddr_t) &flags) == 0) {
+	s = NULL;
+	switch (~flags & PAI_FLAGS_HIBITS) {
+	case PAI_FLAGS_B7_0:
+	    s = "bit 7 set to 1";
+	    break;
+	case PAI_FLAGS_B7_1:
+	    s = "bit 7 set to 0";
+	    break;
+	case PAI_FLAGS_PAR_EVEN:
+	    s = "odd parity";
+	    break;
+	case PAI_FLAGS_PAR_ODD:
+	    s = "even parity";
+	    break;
+	}
+	if (s != NULL) {
+	    syslog(LOG_WARNING, "Serial link is not 8-bit clean:");
+	    syslog(LOG_WARNING, "All received characters had %s", s);
+	}
+    }
+}
 
 /*
  * List of valid speeds.
@@ -482,6 +577,65 @@ int fd, on;
 
 
 /*
+ * open_loopback - open the device we use for getting packets
+ * in demand mode.  Here we use a pty.
+ */
+int
+open_loopback()
+{
+    int flags;
+    struct termios tios;
+    static char c1[] = "pqrstuvwxyzPQRST";
+    static char c2[] = "0123456789abcdef";
+    char *p1, *p2;
+
+    p1 = c1;
+    p2 = c2;
+    strcpy(loop_name, "/dev/ptyxx");
+    loop_slave = -1;
+    for (;;) {
+	loop_name[8] = *p1;
+	loop_name[9] = *p2;
+	if ((loop_master = open(loop_name, O_RDWR, 0)) >= 0) {
+	    loop_name[5] = 't';
+	    chown(loop_name, geteuid(), getegid());
+	    chmod(loop_name, S_IRUSR|S_IWUSR);
+	    if ((loop_slave = open(loop_name, O_RDWR, 0)) >= 0)
+		break;
+	    close(loop_master);
+	    loop_name[5] = 'p';
+	} else if (errno == ENOENT)
+	    break;
+	if (*++p2 == 0) {
+	    p2 = c2;
+	    if (*++p1 == 0)
+		break;
+	}
+    }
+    if (loop_slave < 0) {
+	syslog(LOG_ERR, "No free pty for loopback");
+	die(1);
+    }
+    SYSDEBUG((LOG_DEBUG, "using %s for loopback", loop_name));
+    if (tcgetattr(loop_slave, &tios) == 0) {
+	tios.c_cflag &= ~(CSIZE | CSTOPB | PARENB);
+	tios.c_cflag |= CS8 | CREAD;
+	tios.c_iflag = IGNPAR;
+	tios.c_oflag = 0;
+	tios.c_lflag = 0;
+	if (tcsetattr(loop_slave, TCSAFLUSH, &tios) < 0)
+	    syslog(LOG_WARNING, "couldn't set attributes on loopback: %m");
+    }
+    if ((flags = fcntl(loop_slave, F_GETFL)) != -1) 
+	if (fcntl(loop_slave, F_SETFL, flags | O_NONBLOCK) == -1)
+	    syslog(LOG_WARNING, "couldn't set loopback to nonblock: %m");
+    if ((flags = fcntl(loop_master, F_GETFL)) != -1) 
+	if (fcntl(loop_master, F_SETFL, flags | O_NONBLOCK) == -1)
+	    syslog(LOG_WARNING, "couldn't set loopback(m) to nonblock: %m");
+    return loop_slave;
+}
+
+/*
  * output - Output PPP packet.
  */
 void
@@ -526,6 +680,26 @@ wait_input(timo)
 }
 
 /*
+ * wait_loop_output - wait until there is data available on the,
+ * loopback, for the length of time specified by *timo (indefinite
+ * if timo is NULL).
+ */
+wait_loop_output(timo)
+    struct timeval *timo;
+{
+    fd_set ready;
+    int n;
+
+    FD_ZERO(&ready);
+    FD_SET(loop_master, &ready);
+    n = select(loop_master + 1, &ready, NULL, &ready, timo);
+    if (n < 0 && errno != EINTR) {
+	syslog(LOG_ERR, "select: %m");
+	die(1);
+    }
+}
+
+/*
  * read_packet - get a PPP packet from the serial device.
  */
 int
@@ -565,6 +739,29 @@ read_packet(buf)
 
 
 /*
+ * read_loop_output - get characters from the "bottom" of the loopback.
+ */
+int
+read_loop_output(buf, maxlen)
+    u_char *buf;
+    int maxlen;
+{
+    int len;
+
+    if ((len = read(loop_master, buf, maxlen)) < 0) {
+	if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+	    return 0;
+	syslog(LOG_ERR, "read from loopback: %m");
+	die(1);
+    } else if (len == 0) {
+	syslog(LOG_ERR, "eof on loopback");
+	die(1);
+    }
+    return len;
+}
+
+
+/*
  * ppp_send_config - configure the transmit characteristics of
  * the ppp interface.
  */
@@ -581,24 +778,24 @@ ppp_send_config(unit, mtu, asyncmap, pcomp, accomp)
     ifr.ifr_mtu = mtu;
     if (ioctl(sockfd, SIOCSIFMTU, (caddr_t) &ifr) < 0) {
 	syslog(LOG_ERR, "ioctl(SIOCSIFMTU): %m");
-	quit();
+	die(1);
     }
 
     if(ioctl(fd, SIOCSIFASYNCMAP, (caddr_t) &asyncmap) < 0) {
 	syslog(LOG_ERR, "ioctl(SIOCSIFASYNCMAP): %m");
-	quit();
+	die(1);
     }
 
     c = (pcomp? 1: 0);
     if(ioctl(fd, SIOCSIFCOMPPROT, &c) < 0) {
 	syslog(LOG_ERR, "ioctl(SIOCSIFCOMPPROT): %m");
-	quit();
+	die(1);
     }
 
     c = (accomp? 1: 0);
     if(ioctl(fd, SIOCSIFCOMPAC, &c) < 0) {
 	syslog(LOG_ERR, "ioctl(SIOCSIFCOMPAC): %m");
-	quit();
+	die(1);
     }
 }
 
@@ -715,7 +912,7 @@ sifvjcomp(u, vjcomp, cidcomp, maxcid)
 }
 
 /*
- * sifup - Config the interface up and enable IP packets to pass.
+ * sifup - Config the interface up.
  */
 int
 sifup(u)
@@ -737,10 +934,8 @@ sifup(u)
     npi.protocol = PPP_IP;
     npi.mode = NPMODE_PASS;
     if (ioctl(fd, SIOCSETNPMODE, &npi) < 0) {
-	if (errno != ENOTTY) {
-	    syslog(LOG_ERR, "ioctl(SIOCSETNPMODE): %m");
-	    return 0;
-	}
+	syslog(LOG_ERR, "ioctl(SIOCSETNPMODE): %m");
+	return 0;
     }
     return 1;
 }
@@ -760,10 +955,8 @@ sifdown(u)
     npi.protocol = PPP_IP;
     npi.mode = NPMODE_ERROR;
     if (ioctl(fd, SIOCSETNPMODE, (caddr_t) &npi) < 0) {
-	if (errno != ENOTTY) {
-	    syslog(LOG_ERR, "ioctl(SIOCSETNPMODE): %m");
-	    rv = 0;
-	}
+	syslog(LOG_ERR, "ioctl(SIOCSETNPMODE): %m");
+	rv = 0;
     }
 
     strncpy(ifr.ifr_name, ifname, sizeof (ifr.ifr_name));
@@ -778,6 +971,26 @@ sifdown(u)
 	}
     }
     return rv;
+}
+
+/*
+ * sifnpmode - Set the mode for handling packets for a given NP.
+ */
+int
+sifnpmode(u, proto, mode)
+    int u;
+    int proto;
+    enum NPmode mode;
+{
+    struct npioctl npi;
+
+    npi.protocol = proto;
+    npi.mode = mode;
+    if (ioctl(fd, SIOCSETNPMODE, &npi) < 0) {
+	syslog(LOG_ERR, "ioctl(SIOCSETNPMODE): %m");
+	return 0;
+    }
+    return 1;
 }
 
 /*

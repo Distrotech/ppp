@@ -18,7 +18,7 @@
  */
 
 #ifndef lint
-static char rcsid[] = "$Id: main.c,v 1.23 1995/05/19 03:26:25 paulus Exp $";
+static char rcsid[] = "$Id: main.c,v 1.23.2.1 1995/06/01 07:01:31 paulus Exp $";
 #endif
 
 #include <stdio.h>
@@ -78,14 +78,17 @@ int kill_link;
 int open_ccp_flag;
 
 static int initfdflags = -1;	/* Initial file descriptor flags */
+static int loop_fd = -1;	/* fd for loopback device */
 
 u_char outpacket_buf[PPP_MRU+PPP_HDRLEN]; /* buffer for outgoing packet */
-static u_char inpacket_buf[PPP_MRU+PPP_HDRLEN]; /* buffer for incoming packet */
+u_char inpacket_buf[PPP_MRU+PPP_HDRLEN]; /* buffer for incoming packet */
 
 int hungup;			/* terminal has been hung up */
 static int n_children;		/* # child processes still running */
 
 int baud_rate;
+
+static int locked;
 
 /* prototypes */
 static void hup __P((int));
@@ -93,9 +96,10 @@ static void term __P((int));
 static void chld __P((int));
 static void toggle_debug __P((int));
 static void open_ccp __P((int));
+static void holdoff_end __P((void *));
 
 static void get_input __P((void));
-void establish_ppp __P((void));
+void establish_ppp __P((int));
 void calltimeout __P((void));
 struct timeval *timeleft __P((struct timeval *));
 void reap_kids __P((void));
@@ -207,6 +211,14 @@ main(argc, argv)
     magic_init();
 
     /*
+     * For dial-on-demand, we need to know the remote address.
+     */
+    if (demand && ipcp_wantoptions[0].hisaddr == 0) {
+	fprintf(stderr, "Remote IP address must be specified for dial-on-demand\n");
+	exit(1);
+    }
+
+    /*
      * Detach ourselves from the terminal, if required,
      * and identify who is running us.
      */
@@ -256,13 +268,72 @@ main(argc, argv)
     signal(SIGUSR2, open_ccp);		/* Reopen CCP */
 
     /*
-     * Lock the device if we've been asked to.
+     * If we're doing dial-on-demand, set up the interface now.
      */
-    if (lockflag && !default_device)
-	if (lock(devnam) < 0)
-	    die(1);
+    if (demand) {
+	/*
+	 * Open the loopback channel and set it up to be the ppp interface.
+	 */
+	loop_fd = open_loopback();
+	establish_ppp(loop_fd);
 
-    do {
+	syslog(LOG_INFO, "Using interface ppp%d", ifunit);
+	(void) sprintf(ifname, "ppp%d", ifunit);
+
+	/* write pid to file */
+	(void) sprintf(pidfilename, "%s%s.pid", _PATH_VARRUN, ifname);
+	if ((pidfile = fopen(pidfilename, "w")) != NULL) {
+	    fprintf(pidfile, "%d\n", pid);
+	    (void) fclose(pidfile);
+	} else {
+	    syslog(LOG_ERR, "Failed to create pid file %s: %m", pidfilename);
+	    pidfilename[0] = 0;
+	}
+
+	/*
+	 * Configure the interface and mark it up, etc.
+	 */
+	demand_conf();
+    }
+
+    for (;;) {
+
+	if (demand) {
+	    /*
+	     * Don't do anything until we see some activity.
+	     */
+	    phase = PHASE_DORMANT;
+	    fd = loop_fd;
+	    kill_link = 0;
+	    demand_unblock();
+	    for (;;) {
+		wait_loop_output(timeleft(&timo));
+		calltimeout();
+		if (kill_link) {
+		    if (!persist)
+			die(0);
+		    kill_link = 0;
+		}
+		if (get_loop_output())
+		    break;
+		reap_kids();
+	    }
+
+	    /*
+	     * Now we want to bring up the link.
+	     */
+	    demand_block();
+	    syslog(LOG_INFO, "Starting link");
+	}
+
+	/*
+	 * Lock the device if we've been asked to.
+	 */
+	if (lockflag && !default_device) {
+	    if (lock(devnam) < 0)
+		goto fail;
+	    locked = 1;
+	}
 
 	/*
 	 * Open the serial device and set it up to be the ppp interface.
@@ -273,7 +344,7 @@ main(argc, argv)
 	nonblock = (connector || !modem)? O_NONBLOCK: 0;
 	if ((fd = open(devnam, nonblock | O_RDWR, 0)) < 0) {
 	    syslog(LOG_ERR, "Failed to open %s: %m", devnam);
-	    die(1);
+	    goto fail;
 	}
 	if ((initfdflags = fcntl(fd, F_GETFL)) == -1) {
 	    syslog(LOG_ERR, "Couldn't get device fd flags: %m");
@@ -303,31 +374,15 @@ main(argc, argv)
 	    if (device_script(connector, fd, fd) < 0) {
 		syslog(LOG_ERR, "Connect script failed");
 		setdtr(fd, FALSE);
-		die(1);
+		goto fail;
 	    }
 
-	    syslog(LOG_INFO, "Connected...");
+	    syslog(LOG_INFO, "Serial connection established.");
 	    sleep(1);		/* give it time to set up its terminal */
 	}
   
 	/* set line speed, flow control, etc.; clear CLOCAL if modem option */
 	set_up_tty(fd, 0);
-
-	/* set up the serial device as a ppp interface */
-	establish_ppp();
-
-	syslog(LOG_INFO, "Using interface ppp%d", ifunit);
-	(void) sprintf(ifname, "ppp%d", ifunit);
-
-	/* write pid to file */
-	(void) sprintf(pidfilename, "%s%s.pid", _PATH_VARRUN, ifname);
-	if ((pidfile = fopen(pidfilename, "w")) != NULL) {
-	    fprintf(pidfile, "%d\n", pid);
-	    (void) fclose(pidfile);
-	} else {
-	    syslog(LOG_ERR, "Failed to create pid file %s: %m", pidfilename);
-	    pidfilename[0] = 0;
-	}
 
 	/*
 	 * Set device for non-blocking reads.
@@ -337,8 +392,33 @@ main(argc, argv)
 	    die(1);
 	}
   
+	if (!demand) {
+	    /* set up the serial device as a ppp interface */
+	    establish_ppp(fd);
+	    
+	    syslog(LOG_INFO, "Using interface ppp%d", ifunit);
+	    (void) sprintf(ifname, "ppp%d", ifunit);
+	    
+	    /* write pid to file */
+	    (void) sprintf(pidfilename, "%s%s.pid", _PATH_VARRUN, ifname);
+	    if ((pidfile = fopen(pidfilename, "w")) != NULL) {
+		fprintf(pidfile, "%d\n", pid);
+		(void) fclose(pidfile);
+	    } else {
+		syslog(LOG_ERR, "Failed to create pid file %s: %m",
+		       pidfilename);
+		pidfilename[0] = 0;
+	    }
+
+	} else {
+	    /*
+	     * Transfer the PPP unit over to the real serial device.
+	     */
+	    transfer_ppp(fd);
+	}
+
 	/*
-	 * Block all signals, start opening the connection, and wait for
+	 * Start opening the connection and wait for
 	 * incoming events (reply, timeout, etc.).
 	 */
 	syslog(LOG_NOTICE, "Connect: %s <--> %s", ifname, devnam);
@@ -363,32 +443,79 @@ main(argc, argv)
 	}
 
 	/*
+	 * If we may want to bring the link up again, transfer
+	 * the ppp unit back to the loopback.  Set the
+	 * real serial device back to its normal mode of operation.
+	 */
+	clean_check();
+	if (demand) {
+	    transfer_ppp(loop_fd);
+	} else {
+	    disestablish_ppp(fd);
+	}
+
+	/*
 	 * Run disconnector script, if requested.
 	 * First we need to reset non-blocking mode.
+	 * XXX we may not be able to do this if the line has hung up!
 	 */
 	if (initfdflags != -1 && fcntl(fd, F_SETFL, initfdflags) >= 0)
 	    initfdflags = -1;
-	disestablish_ppp();
-	if (disconnector) {
+	if (disconnector && !hungup) {
 	    set_up_tty(fd, 1);
 	    if (device_script(disconnector, fd, fd) < 0) {
 		syslog(LOG_WARNING, "disconnect script failed");
-		die(1);
+	    } else {
+		syslog(LOG_INFO, "Serial link disconnected.");
 	    }
-
-	    syslog(LOG_INFO, "Disconnected...");
 	}
 
+    fail:
 	close_fd();
-	if (unlink(pidfilename) < 0 && errno != ENOENT) 
-	    syslog(LOG_WARNING, "unable to delete pid file: %m");
-	pidfilename[0] = 0;
+	if (locked) {
+	    unlock();
+	    locked = 0;
+	}
 
-    } while (persist);
+	if (!demand) {
+	    if (unlink(pidfilename) < 0 && errno != ENOENT) 
+		syslog(LOG_WARNING, "unable to delete pid file: %m");
+	    pidfilename[0] = 0;
+	}
+
+	if (!persist)
+	    break;
+
+	demand_discard();
+	if (holdoff > 0) {
+	    phase = PHASE_HOLDOFF;
+	    TIMEOUT(holdoff_end, NULL, holdoff);
+	    do {
+		wait_time(timeleft(&timo));
+		calltimeout();
+		if (kill_link) {
+		    if (!persist)
+			die(0);
+		    kill_link = 0;
+		    phase = PHASE_DORMANT; /* allow signal to end holdoff */
+		}
+		reap_kids();
+	    } while (phase == PHASE_HOLDOFF);
+	}
+    }
 
     die(0);
 }
 
+/*
+ * holdoff_end - called via a timeout when the holdoff period ends.
+ */
+static void
+holdoff_end(arg)
+    void *arg;
+{
+    phase = PHASE_DORMANT;
+}
 
 /*
  * get_input - called when incoming data is available.
@@ -518,8 +645,11 @@ cleanup(status, arg)
 	syslog(LOG_WARNING, "unable to delete pid file: %m");
     pidfilename[0] = 0;
 
-    if (lockflag && !default_device)
+    if (locked)
 	unlock();
+
+    if (demand)
+	demand_reset();
 }
 
 /*
@@ -536,7 +666,7 @@ close_fd()
 	syslog(LOG_WARNING, "Couldn't restore device fd flags: %m");
     initfdflags = -1;
 
-    disestablish_ppp();
+    disestablish_ppp(fd);
 
     restore_tty();
 
@@ -760,6 +890,7 @@ device_script(program, in, out)
 {
     int pid;
     int status;
+    int errfd;
 
     pid = fork();
 
@@ -769,10 +900,14 @@ device_script(program, in, out)
     }
 
     if (pid == 0) {
-	setuid(getuid());
-	setgid(getgid());
+	sys_close();
 	dup2(in, 0);
 	dup2(out, 1);
+	errfd = open(_PATH_CONNERRS, O_WRONLY | O_APPEND | O_CREAT, 0644);
+	if (errfd >= 0)
+	    dup2(errfd, 2);
+	setuid(getuid());
+	setgid(getgid());
 	execl("/bin/sh", "sh", "-c", program, (char *)0);
 	syslog(LOG_ERR, "could not exec /bin/sh: %m");
 	_exit(99);
@@ -821,11 +956,11 @@ run_program(prog, args, must_exist)
 	setgid(getegid());
 
 	/* Ensure that nothing of our device environment is inherited. */
+	sys_close();
 	close (0);
 	close (1);
 	close (2);
 	close (fd);  /* tty interface to the ppp device */
-	/* XXX should call sysdep cleanup procedure here */
 
         /* Don't pass handles to the PPP device, even by accident. */
 	new_fd = open (_PATH_DEVNULL, O_RDWR);

@@ -16,7 +16,7 @@
  * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
  * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
  *
- * $Id: pppd.h,v 1.8 1995/04/26 06:46:31 paulus Exp $
+ * $Id: pppd.h,v 1.8.2.1 1995/06/01 07:01:37 paulus Exp $
  */
 
 /*
@@ -83,17 +83,22 @@ extern char	our_name[];	/* Our name for authentication purposes */
 extern char	remote_name[];	/* Peer's name for authentication */
 extern int	usehostname;	/* Use hostname for our_name */
 extern int	disable_defaultip; /* Don't use hostname for default IP adrs */
+extern int	demand;		/* Do dial-on-demand */
 extern char	*ipparam;	/* Extra parameter for ip up/down scripts */
 extern int	cryptpap;	/* Others' PAP passwords are encrypted */
+extern int	idle_time_limit;/* Shut down link if idle for this long */
+extern int	holdoff;	/* Dead time before restarting */
 
 /*
  * Values for phase.
  */
 #define PHASE_DEAD		0
-#define PHASE_ESTABLISH		1
-#define PHASE_AUTHENTICATE	2
-#define PHASE_NETWORK		3
-#define PHASE_TERMINATE		4
+#define PHASE_DORMANT		1
+#define PHASE_ESTABLISH		2
+#define PHASE_AUTHENTICATE	3
+#define PHASE_NETWORK		4
+#define PHASE_TERMINATE		5
+#define PHASE_HOLDOFF		6
 
 /*
  * Prototypes.
@@ -113,6 +118,9 @@ int  get_secret __P((int, char *, char *, char *, int *, int));
 				/* get "secret" for chap */
 u_int32_t GetMask __P((u_int32_t)); /* get netmask for address */
 void die __P((int));
+void np_up __P((int, int));
+void np_down __P((int, int));
+void np_finished __P((int, int));
 
 /*
  * Inline versions of get/put char/short/long.
@@ -192,9 +200,9 @@ void die __P((int));
 #endif
 
 #ifndef LOG_PPP			/* we use LOG_LOCAL2 for syslog by default */
-#if defined(DEBUGMAIN) || defined(DEBUGFSM) || defined(DEBUG) \
+#if defined(DEBUGMAIN) || defined(DEBUGFSM) || defined(DEBUGSYS) \
   || defined(DEBUGLCP) || defined(DEBUGIPCP) || defined(DEBUGUPAP) \
-  || defined(DEBUGCHAP) 
+  || defined(DEBUGCHAP) || defined(DEBUG)
 #define LOG_PPP LOG_LOCAL2
 #else
 #define LOG_PPP LOG_DAEMON
@@ -205,6 +213,12 @@ void die __P((int));
 #define MAINDEBUG(x)	if (debug) syslog x
 #else
 #define MAINDEBUG(x)
+#endif
+
+#ifdef DEBUGSYS
+#define SYSDEBUG(x)	if (debug) syslog x
+#else
+#define SYSDEBUG(x)
 #endif
 
 #ifdef DEBUGFSM

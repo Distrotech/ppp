@@ -18,7 +18,7 @@
  */
 
 #ifndef lint
-static char rcsid[] = "$Id: options.c,v 1.19 1995/04/27 00:20:16 paulus Exp $";
+static char rcsid[] = "$Id: options.c,v 1.19.2.1 1995/06/01 07:01:33 paulus Exp $";
 #endif
 
 #include <stdio.h>
@@ -86,13 +86,11 @@ char	our_name[MAXNAMELEN];	/* Our name for authentication purposes */
 char	remote_name[MAXNAMELEN]; /* Peer's name for authentication */
 int	usehostname = 0;	/* Use hostname for our_name */
 int	disable_defaultip = 0;	/* Don't use hostname for default IP adrs */
+int	demand = 0;		/* do dial-on-demand */
 char	*ipparam = NULL;	/* Extra parameter for ip up/down scripts */
 int	cryptpap;		/* Passwords in pap-secrets are encrypted */
-
-#ifdef _linux_
-int idle_time_limit = 0;
-static int setidle __P((char **));
-#endif
+int	idle_time_limit = 0;	/* Disconnect if idle for this many seconds */
+int	holdoff = 30;		/* # seconds to pause before reconnecting */
 
 /*
  * Prototypes
@@ -138,7 +136,9 @@ static int setremote __P((char **));
 static int setauth __P((void));
 static int readfile __P((char **));
 static int setdefaultroute __P((void));
+static int setnodefaultroute __P((void));
 static int setproxyarp __P((void));
+static int setnoproxyarp __P((void));
 static int setpersist __P((void));
 static int setdologin __P((void));
 static int setusehostname __P((void));
@@ -162,8 +162,11 @@ static int setlcpechointv __P((char **));
 static int setlcpechofails __P((char **));
 static int setbsdcomp __P((char **));
 static int setnobsdcomp __P((void));
+static int setdemand __P((void));
 static int setipparam __P((char **));
 static int setpapcrypt __P((void));
+static int setidle __P((char **));
+static int setholdoff __P((char **));
 
 static int number_option __P((char *, long *, int));
 static int readable __P((int fd));
@@ -222,8 +225,11 @@ static struct cmd {
     {"auth", 0, setauth},	/* Require authentication from peer */
     {"file", 1, readfile},	/* Take options from a file */
     {"defaultroute", 0, setdefaultroute}, /* Add default route */
+    {"-defaultroute", 0, setnodefaultroute}, /* disable defaultroute option */
     {"proxyarp", 0, setproxyarp}, /* Add proxy ARP entry */
+    {"-proxyarp", 0, setnoproxyarp}, /* disable proxyarp option */
     {"persist", 0, setpersist},	/* Keep on reopening connection after close */
+    {"demand", 0, setdemand},	/* Dial on demand */
     {"login", 0, setdologin},	/* Use system password database for UPAP */
     {"noipdefault", 0, setnoipdflt}, /* Don't use name for default IP adrs */
     {"lcp-echo-failure", 1, setlcpechofails}, /* consecutive echo failures */
@@ -247,9 +253,8 @@ static struct cmd {
     {"-bsdcomp", 0, setnobsdcomp},	/* don't allow BSD-Compress */
     {"ipparam", 1, setipparam},		/* set ip script parameter */
     {"papcrypt", 0, setpapcrypt},	/* PAP passwords encrypted */
-#ifdef _linux_
-    {"idle-disconnect", 1, setidle}, /* seconds for disconnect of idle IP */
-#endif
+    {"idle", 1, setidle},		/* idle time limit (seconds) */
+    {"holdoff", 1, setholdoff},		/* set holdoff time (seconds) */
     {NULL, 0, NULL}
 };
 
@@ -1279,6 +1284,13 @@ setnodetach()
 }
 
 static int
+setdemand()
+{
+    demand = 1;
+    return 1;
+}
+
+static int
 setmodem()
 {
     modem = 1;
@@ -1345,14 +1357,38 @@ setauth()
 static int
 setdefaultroute()
 {
+    if (!ipcp_allowoptions[0].default_route) {
+	fprintf(stderr, "%s: defaultroute option is disabled\n", progname);
+	return 0;
+    }
     ipcp_wantoptions[0].default_route = 1;
+    return 1;
+}
+
+static int
+setnodefaultroute()
+{
+    ipcp_allowoptions[0].default_route = 0;
+    ipcp_wantoptions[0].default_route = 0;
     return 1;
 }
 
 static int
 setproxyarp()
 {
+    if (!ipcp_allowoptions[0].proxy_arp) {
+	fprintf(stderr, "%s: proxyarp option is disabled\n", progname);
+	return 0;
+    }
     ipcp_wantoptions[0].proxy_arp = 1;
+    return 1;
+}
+
+static int
+setnoproxyarp()
+{
+    ipcp_wantoptions[0].proxy_arp = 0;
+    ipcp_allowoptions[0].proxy_arp = 0;
     return 1;
 }
 
@@ -1545,10 +1581,16 @@ setpapcrypt()
     return 1;
 }
 
-#ifdef _linux_
-static int setidle (argv)
+static int
+setidle(argv)
     char **argv;
 {
     return int_option(*argv, &idle_time_limit);
 }
-#endif
+
+static int
+setholdoff(argv)
+    char **argv;
+{
+    return int_option(*argv, &holdoff);
+}

@@ -18,7 +18,7 @@
  */
 
 #ifndef lint
-static char rcsid[] = "$Id: ipcp.c,v 1.19 1995/06/01 01:30:38 paulus Exp $";
+static char rcsid[] = "$Id: ipcp.c,v 1.19.2.1 1995/06/01 07:01:26 paulus Exp $";
 #endif
 
 /*
@@ -44,7 +44,9 @@ ipcp_options ipcp_allowoptions[NUM_PPP];	/* Options we allow peer to request */
 ipcp_options ipcp_hisoptions[NUM_PPP];	/* Options that we ack'd */
 
 /* local vars */
-static int cis_received[NUM_PPP];		/* # Conf-Reqs received */
+static int cis_received[NUM_PPP];	/* # Conf-Reqs received */
+static int default_route_set[NUM_PPP];	/* Have set up a default route */
+static int proxy_arp_set[NUM_PPP];	/* Have created proxy arp entry */
 
 /*
  * Callbacks for fsm code.  (CI = Configuration Information)
@@ -59,6 +61,7 @@ static int  ipcp_reqci __P((fsm *, u_char *, int *, int)); /* Rcv CI */
 static void ipcp_up __P((fsm *));		/* We're UP */
 static void ipcp_down __P((fsm *));		/* We're DOWN */
 static void ipcp_script __P((fsm *, char *)); /* Run an up/down script */
+static void ipcp_finished __P((fsm *));	/* Don't need lower layer */
 
 fsm ipcp_fsm[NUM_PPP];		/* IPCP fsm structure */
 
@@ -73,7 +76,7 @@ static fsm_callbacks ipcp_callbacks = { /* IPCP callback routines */
     ipcp_up,			/* Called when fsm reaches OPENED state */
     ipcp_down,			/* Called when fsm leaves OPENED state */
     NULL,			/* Called when we want the lower layer up */
-    NULL,			/* Called when we want the lower layer down */
+    ipcp_finished,		/* Called when we want the lower layer down */
     NULL,			/* Called when Protocol-Reject received */
     NULL,			/* Retransmission is necessary */
     NULL,			/* Called to handle protocol-specific codes */
@@ -149,6 +152,8 @@ ipcp_init(unit)
     ao->neg_vj = 1;
     ao->maxslotindex = MAX_STATES - 1;
     ao->cflag = 1;
+    ao->default_route = 1;
+    ao->proxy_arp = 1;
 }
 
 
@@ -963,6 +968,57 @@ endswitch:
 
 
 /*
+ * ipcp_demand_conf - configure the interface as though
+ * IPCP were up, for use with dial-on-demand.
+ */
+int
+ipcp_demand_conf(u)
+    int u;
+{
+    ipcp_options *wo = &ipcp_wantoptions[u];
+
+    if (!sifaddr(u, wo->ouraddr, wo->hisaddr, GetMask(wo->ouraddr)))
+	return 0;
+    if (!sifup(u))
+	return 0;
+    if (wo->default_route)
+	if (sifdefaultroute(u, wo->hisaddr))
+	    default_route_set[u] = 1;
+    if (wo->proxy_arp)
+	if (sifproxyarp(u, wo->hisaddr))
+	    proxy_arp_set[u] = 1;
+
+    syslog(LOG_NOTICE, "local  IP address %s", ip_ntoa(wo->ouraddr));
+    syslog(LOG_NOTICE, "remote IP address %s", ip_ntoa(wo->hisaddr));
+
+    return 1;
+}
+
+
+/*
+ * ipcp_demand_reset - reset the interface, which has been
+ * configured for dial-on-demand.
+ */
+void
+ipcp_demand_reset(u)
+    int u;
+{
+    ipcp_options *wo = &ipcp_wantoptions[u];
+
+    if (proxy_arp_set[u]) {
+	cifproxyarp(u, wo->hisaddr);
+	proxy_arp_set[u] = 0;
+    }
+    if (default_route_set[u]) {
+	cifdefaultroute(u, wo->hisaddr);
+	default_route_set[u] = 0;
+    }
+    sifdown(u);
+    cifaddr(u, wo->ouraddr, wo->hisaddr);
+}
+
+
+/*
  * ipcp_up - IPCP has come UP.
  *
  * Configure the IP network interface appropriately and bring it up.
@@ -974,16 +1030,16 @@ ipcp_up(f)
     u_int32_t mask;
     ipcp_options *ho = &ipcp_hisoptions[f->unit];
     ipcp_options *go = &ipcp_gotoptions[f->unit];
+    ipcp_options *wo = &ipcp_wantoptions[f->unit];
 
+    np_up(f->unit, PPP_IP);
     IPCPDEBUG((LOG_INFO, "ipcp: up"));
-    go->default_route = 0;
-    go->proxy_arp = 0;
 
     /*
      * We must have a non-zero IP address for both ends of the link.
      */
     if (!ho->neg_addr)
-	ho->hisaddr = ipcp_wantoptions[f->unit].hisaddr;
+	ho->hisaddr = wo->hisaddr;
 
     if (ho->hisaddr == 0) {
 	syslog(LOG_ERR, "Could not determine remote IP address");
@@ -1006,38 +1062,55 @@ ipcp_up(f)
 	return;
     }
 
-    syslog(LOG_NOTICE, "local  IP address %s", ip_ntoa(go->ouraddr));
-    syslog(LOG_NOTICE, "remote IP address %s", ip_ntoa(ho->hisaddr));
-
-    /*
-     * Set IP addresses and (if specified) netmask.
-     */
-    mask = GetMask(go->ouraddr);
-    if (!sifaddr(f->unit, go->ouraddr, ho->hisaddr, mask)) {
-	IPCPDEBUG((LOG_WARNING, "sifaddr failed"));
-	ipcp_close(f->unit);
-	return;
-    }
-
     /* set tcp compression */
     sifvjcomp(f->unit, ho->neg_vj, ho->cflag, ho->maxslotindex);
 
-    /* bring the interface up for IP */
-    if (!sifup(f->unit)) {
-	IPCPDEBUG((LOG_WARNING, "sifup failed"));
-	ipcp_close(f->unit);
-	return;
+    /*
+     * If we are doing dial-on-demand, the interface is already
+     * configured, so we put out any saved-up packets, then set the
+     * interface to pass IP packets.
+     */
+    if (demand) {
+	if (go->ouraddr != wo->ouraddr || ho->hisaddr != wo->hisaddr) {
+	    syslog(LOG_ERR, "Failed to negotiate desired IP addresses");
+	    ipcp_close(f->unit);
+	    return;
+	}
+	demand_rexmit(PPP_IP);
+	sifnpmode(f->unit, PPP_IP, NPMODE_PASS);
+
+    } else {
+
+	/*
+	 * Set IP addresses and (if specified) netmask.
+	 */
+	mask = GetMask(go->ouraddr);
+	if (!sifaddr(f->unit, go->ouraddr, ho->hisaddr, mask)) {
+	    IPCPDEBUG((LOG_WARNING, "sifaddr failed"));
+	    ipcp_close(f->unit);
+	    return;
+	}
+
+	/* bring the interface up for IP */
+	if (!sifup(f->unit)) {
+	    IPCPDEBUG((LOG_WARNING, "sifup failed"));
+	    ipcp_close(f->unit);
+	    return;
+	}
+
+	/* assign a default route through the interface if required */
+	if (ipcp_wantoptions[f->unit].default_route) 
+	    if (sifdefaultroute(f->unit, ho->hisaddr))
+		default_route_set[f->unit] = 1;
+
+	/* Make a proxy ARP entry if requested. */
+	if (ipcp_wantoptions[f->unit].proxy_arp)
+	    if (sifproxyarp(f->unit, ho->hisaddr))
+		proxy_arp_set[f->unit] = 1;
+
+	syslog(LOG_NOTICE, "local  IP address %s", ip_ntoa(go->ouraddr));
+	syslog(LOG_NOTICE, "remote IP address %s", ip_ntoa(ho->hisaddr));
     }
-
-    /* assign a default route through the interface if required */
-    if (ipcp_wantoptions[f->unit].default_route) 
-	if (sifdefaultroute(f->unit, ho->hisaddr))
-	    go->default_route = 1;
-
-    /* Make a proxy ARP entry if requested. */
-    if (ipcp_wantoptions[f->unit].proxy_arp)
-	if (sifproxyarp(f->unit, ho->hisaddr))
-	    go->proxy_arp = 1;
 
     /*
      * Execute the ip-up script, like this:
@@ -1060,19 +1133,44 @@ ipcp_down(f)
 {
     u_int32_t ouraddr, hisaddr;
 
+    np_down(f->unit, PPP_IP);
     IPCPDEBUG((LOG_INFO, "ipcp: down"));
 
-    ouraddr = ipcp_gotoptions[f->unit].ouraddr;
-    hisaddr = ipcp_hisoptions[f->unit].hisaddr;
-    if (ipcp_gotoptions[f->unit].proxy_arp)
-	cifproxyarp(f->unit, hisaddr);
-    if (ipcp_gotoptions[f->unit].default_route) 
-	cifdefaultroute(f->unit, hisaddr);
-    sifdown(f->unit);
-    cifaddr(f->unit, ouraddr, hisaddr);
+    /*
+     * If we are doing dial-on-demand, set the interface
+     * to drop outgoing packets with an error (for now).
+     */
+    if (demand) {
+	sifnpmode(f->unit, PPP_IP, NPMODE_ERROR);
+
+    } else {
+	ouraddr = ipcp_gotoptions[f->unit].ouraddr;
+	hisaddr = ipcp_hisoptions[f->unit].hisaddr;
+	if (proxy_arp_set[f->unit]) {
+	    cifproxyarp(f->unit, hisaddr);
+	    proxy_arp_set[f->unit] = 0;
+	}
+	if (default_route_set[f->unit]) {
+	    cifdefaultroute(f->unit, hisaddr);
+	    default_route_set[f->unit] = 0;
+	}
+	sifdown(f->unit);
+	cifaddr(f->unit, ouraddr, hisaddr);
+    }
 
     /* Execute the ip-down script */
     ipcp_script(f, _PATH_IPDOWN);
+}
+
+
+/*
+ * ipcp_finished - possibly shut down the lower layers.
+ */
+static void
+ipcp_finished(f)
+    fsm *f;
+{
+    np_finished(f->unit, PPP_IP);
 }
 
 

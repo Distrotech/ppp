@@ -33,7 +33,7 @@
  */
 
 #ifndef lint
-static char rcsid[] = "$Id: auth.c,v 1.15 1995/05/19 03:16:12 paulus Exp $";
+static char rcsid[] = "$Id: auth.c,v 1.15.2.1 1995/06/01 07:01:21 paulus Exp $";
 #endif
 
 #include <stdio.h>
@@ -87,8 +87,18 @@ struct wordlist {
 
 /* Records which authentication operations haven't completed yet. */
 static int auth_pending[NUM_PPP];
+
+/* Set if we have successfully called login() */
 static int logged_in;
+
+/* List of addresses which the peer may use. */
 static struct wordlist *addresses[NUM_PPP];
+
+/* Number of network protocols which we have opened. */
+static int num_np_open;
+
+/* Number of network protocols which have come up. */
+static int num_np_up;
 
 /* Bits in auth_pending[] */
 #define UPAP_WITHPEER	1
@@ -100,6 +110,7 @@ static struct wordlist *addresses[NUM_PPP];
 void check_access __P((FILE *, char *));
 
 static void network_phase __P((int));
+static void check_idle __P((caddr_t));
 static int  login __P((char *, char *, char **, int *));
 static void logout __P((void));
 static int  null_login __P((int));
@@ -207,6 +218,7 @@ network_phase(unit)
     int unit;
 {
     phase = PHASE_NETWORK;
+    num_np_open = 1;
     ipcp_open(unit);
     ccp_open(unit);
 }
@@ -302,6 +314,67 @@ auth_withpeer_success(unit, protocol)
 	network_phase(unit);
 }
 
+
+/*
+ * np_up - a network protocol has come up.
+ */
+void
+np_up(unit, proto)
+    int unit, proto;
+{
+    if (num_np_up == 0 && idle_time_limit > 0) {
+	TIMEOUT(check_idle, NULL, idle_time_limit);
+    }
+    ++num_np_up;
+}
+
+/*
+ * np_down - a network protocol has gone down.
+ */
+void
+np_down(unit, proto)
+    int unit, proto;
+{
+    if (--num_np_up == 0 && idle_time_limit > 0) {
+	UNTIMEOUT(check_idle, NULL);
+    }
+}
+
+/*
+ * np_finished - a network protocol has finished using the link.
+ */
+void
+np_finished(unit, proto)
+    int unit, proto;
+{
+    if (--num_np_open <= 0) {
+	/* no further use for the link: shut up shop. */
+	lcp_close(0);
+    }
+}
+
+/*
+ * check_idle - check whether the link has been idle for long
+ * enough that we can shut it down.
+ */
+static void
+check_idle(arg)
+    caddr_t arg;
+{
+    struct ppp_idle idle;
+    time_t itime;
+
+    if (!get_idle_time(0, &idle))
+	return;
+    itime = MIN(idle.xmit_idle, idle.recv_idle);
+    if (itime >= idle_time_limit) {
+	/* link is idle: shut it down. */
+	syslog(LOG_INFO, "Terminating connection due to lack of activity.");
+	lcp_close(0);
+    } else {
+	TIMEOUT(check_idle, NULL, idle_time_limit - itime);
+    }
+}
 
 /*
  * check_auth_options - called to check authentication options.
