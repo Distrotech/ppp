@@ -18,7 +18,7 @@
  */
 
 #ifndef lint
-static char rcsid[] = "$Id: main.c,v 1.23.2.1 1995/06/01 07:01:31 paulus Exp $";
+static char rcsid[] = "$Id: main.c,v 1.23.2.2 1995/06/06 12:11:43 paulus Exp $";
 #endif
 
 #include <stdio.h>
@@ -293,6 +293,7 @@ main(argc, argv)
 	/*
 	 * Configure the interface and mark it up, etc.
 	 */
+	fd = loop_fd;
 	demand_conf();
     }
 

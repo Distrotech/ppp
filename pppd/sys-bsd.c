@@ -19,7 +19,7 @@
  */
 
 #ifndef lint
-static char rcsid[] = "$Id: sys-bsd.c,v 1.19.2.1 1995/06/01 07:01:39 paulus Exp $";
+static char rcsid[] = "$Id: sys-bsd.c,v 1.19.2.2 1995/06/06 12:11:45 paulus Exp $";
 #endif
 
 /*
@@ -92,6 +92,10 @@ void
 sys_close()
 {
     close(sockfd);
+    if (loop_slave >= 0) {
+	close(loop_slave);
+	close(loop_master);
+    }
     closelog();
 }
 
@@ -428,7 +432,7 @@ output(unit, p, len)
     if (debug)
 	log_packet(p, len, "sent ");
 
-    if (write(fd, p, len) < 0) {
+    if (write(ppp_fd, p, len) < 0) {
 	syslog(LOG_ERR, "write: %m");
 	die(1);
     }
@@ -556,18 +560,18 @@ ppp_send_config(unit, mtu, asyncmap, pcomp, accomp)
 	die(1);
     }
 
-    if (ioctl(fd, PPPIOCSASYNCMAP, (caddr_t) &asyncmap) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSASYNCMAP, (caddr_t) &asyncmap) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCSASYNCMAP): %m");
 	die(1);
     }
 
-    if (ioctl(fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl (PPPIOCGFLAGS): %m");
 	die(1);
     }
     x = pcomp? x | SC_COMP_PROT: x &~ SC_COMP_PROT;
     x = accomp? x | SC_COMP_AC: x &~ SC_COMP_AC;
-    if (ioctl(fd, PPPIOCSFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCSFLAGS): %m");
 	die(1);
     }
@@ -582,7 +586,7 @@ ppp_set_xaccm(unit, accm)
     int unit;
     ext_accm accm;
 {
-    if (ioctl(fd, PPPIOCSXASYNCMAP, accm) < 0 && errno != ENOTTY)
+    if (ioctl(ppp_fd, PPPIOCSXASYNCMAP, accm) < 0 && errno != ENOTTY)
 	syslog(LOG_WARNING, "ioctl(set extended ACCM): %m");
 }
 
@@ -599,20 +603,20 @@ ppp_recv_config(unit, mru, asyncmap, pcomp, accomp)
 {
     int x;
 
-    if (ioctl(fd, PPPIOCSMRU, (caddr_t) &mru) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSMRU, (caddr_t) &mru) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCSMRU): %m");
 	die(1);
     }
-    if (ioctl(fd, PPPIOCSRASYNCMAP, (caddr_t) &asyncmap) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSRASYNCMAP, (caddr_t) &asyncmap) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCSRASYNCMAP): %m");
 	die(1);
     }
-    if (ioctl(fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl (PPPIOCGFLAGS): %m");
 	die(1);
     }
     x = !accomp? x | SC_REJ_COMP_AC: x &~ SC_REJ_COMP_AC;
-    if (ioctl(fd, PPPIOCSFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCSFLAGS): %m");
 	die(1);
     }
@@ -631,7 +635,7 @@ ccp_test(unit, opt_ptr, opt_len, for_transmit)
     data.ptr = opt_ptr;
     data.length = opt_len;
     data.transmit = for_transmit;
-    return ioctl(fd, PPPIOCSCOMPRESS, (caddr_t) &data) >= 0;
+    return ioctl(ppp_fd, PPPIOCSCOMPRESS, (caddr_t) &data) >= 0;
 }
 
 /*
@@ -643,13 +647,13 @@ ccp_flags_set(unit, isopen, isup)
 {
     int x;
 
-    if (ioctl(fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl (PPPIOCGFLAGS): %m");
 	return;
     }
     x = isopen? x | SC_CCP_OPEN: x &~ SC_CCP_OPEN;
     x = isup? x | SC_CCP_UP: x &~ SC_CCP_UP;
-    if (ioctl(fd, PPPIOCSFLAGS, (caddr_t) &x) < 0)
+    if (ioctl(ppp_fd, PPPIOCSFLAGS, (caddr_t) &x) < 0)
 	syslog(LOG_ERR, "ioctl(PPPIOCSFLAGS): %m");
 }
 
@@ -664,7 +668,7 @@ ccp_fatal_error(unit)
 {
     int x;
 
-    if (ioctl(fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCGFLAGS): %m");
 	return 0;
     }
@@ -679,7 +683,7 @@ get_idle_time(u, ip)
     int u;
     struct ppp_idle *ip;
 {
-    return ioctl(fd, PPPIOCGIDLE, ip) >= 0;
+    return ioctl(ppp_fd, PPPIOCGIDLE, ip) >= 0;
 }
 
 
@@ -692,17 +696,17 @@ sifvjcomp(u, vjcomp, cidcomp, maxcid)
 {
     u_int x;
 
-    if (ioctl(fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCGFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl (PPPIOCGFLAGS): %m");
 	return 0;
     }
     x = vjcomp ? x | SC_COMP_TCP: x &~ SC_COMP_TCP;
     x = cidcomp? x & ~SC_NO_TCP_CCID: x | SC_NO_TCP_CCID;
-    if (ioctl(fd, PPPIOCSFLAGS, (caddr_t) &x) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSFLAGS, (caddr_t) &x) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCSFLAGS): %m");
 	return 0;
     }
-    if (ioctl(fd, PPPIOCSMAXCID, (caddr_t) &maxcid) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSMAXCID, (caddr_t) &maxcid) < 0) {
 	syslog(LOG_ERR, "ioctl(PPPIOCSFLAGS): %m");
 	return 0;
     }
@@ -731,7 +735,7 @@ sifup(u)
     }
     npi.protocol = PPP_IP;
     npi.mode = NPMODE_PASS;
-    if (ioctl(fd, PPPIOCSNPMODE, &npi) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSNPMODE, &npi) < 0) {
 	syslog(LOG_ERR, "ioctl(set IP mode to PASS): %m");
 	return 0;
     }
@@ -751,7 +755,7 @@ sifnpmode(u, proto, mode)
 
     npi.protocol = proto;
     npi.mode = mode;
-    if (ioctl(fd, PPPIOCSNPMODE, &npi) < 0) {
+    if (ioctl(ppp_fd, PPPIOCSNPMODE, &npi) < 0) {
 	syslog(LOG_ERR, "ioctl(set NP %d mode to %d): %m", proto, mode);
 	return 0;
     }
@@ -846,7 +850,8 @@ cifaddr(u, o, h)
     ((struct sockaddr_in *) &ifra.ifra_broadaddr)->sin_addr.s_addr = h;
     BZERO(&ifra.ifra_mask, sizeof(ifra.ifra_mask));
     if (ioctl(sockfd, SIOCDIFADDR, (caddr_t) &ifra) < 0) {
-	syslog(LOG_WARNING, "ioctl(SIOCDIFADDR): %m");
+	if (errno != EADDRNOTAVAIL)
+	    syslog(LOG_WARNING, "ioctl(SIOCDIFADDR): %m");
 	return 0;
     }
     return 1;
