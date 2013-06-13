@@ -3,9 +3,9 @@
 # Copyright 2002 Roaring Penguin Software Inc.
 #
 
-DESTDIR = $(INSTROOT)@DESTDIR@
-MANDIR = $(DESTDIR)/share/man/man8
-LIBDIR = $(DESTDIR)/lib/pppd/$(VERSION)
+DESTDIR2 = $(DESTDIR)@DESTDIR@
+MANDIR = $(DESTDIR2)/share/man/man8
+LIBDIR = $(DESTDIR2)/lib/pppd/$(VERSION)
 
 VERSION = $(shell awk -F '"' '/VERSION/ { print $$2; }' ../../patchlevel.h)
 
@@ -36,9 +36,9 @@ all: $(PLUGIN)
 
 install: all
 	$(INSTALL) -d -m 755 $(LIBDIR)
-	$(INSTALL) -s -c -m 755 radius.so $(LIBDIR)
-	$(INSTALL) -s -c -m 755 radattr.so $(LIBDIR)
-	$(INSTALL) -s -c -m 755 radrealms.so $(LIBDIR)
+	$(INSTALL) -c -m 755 radius.so $(LIBDIR)
+	$(INSTALL) -c -m 755 radattr.so $(LIBDIR)
+	$(INSTALL) -c -m 755 radrealms.so $(LIBDIR)
 	$(INSTALL) -c -m 444 pppd-radius.8 $(MANDIR)
 	$(INSTALL) -c -m 444 pppd-radattr.8 $(MANDIR)
 

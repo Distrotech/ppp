@@ -4,10 +4,10 @@
 #
 
 # Default installation locations
-DESTDIR = $(INSTROOT)@DESTDIR@
-BINDIR = $(DESTDIR)/sbin
-MANDIR = $(DESTDIR)/share/man/man8
-INCDIR = $(DESTDIR)/include
+DESTDIR2 = $(DESTDIR)@DESTDIR@
+BINDIR = $(DESTDIR2)/sbin
+MANDIR = $(DESTDIR2)/share/man/man8
+INCDIR = $(DESTDIR2)/include
 
 TARGETS = pppd
 
@@ -99,7 +99,7 @@ ifdef USE_SRP
 CFLAGS	+= -DUSE_SRP -DOPENSSL -I/usr/local/ssl/include
 LIBS	+= -lsrp -L/usr/local/ssl/lib -lcrypto
 TARGETS	+= srp-entry
-EXTRAINSTALL = $(INSTALL) -s -c -m 555 srp-entry $(BINDIR)/srp-entry
+EXTRAINSTALL = $(INSTALL) -c -m 555 srp-entry $(BINDIR)/srp-entry
 MANPAGES += srp-entry.8
 EXTRACLEAN += srp-entry.o
 NEEDDES=y
@@ -170,7 +170,7 @@ endif
 
 ifdef FILTER
 ifneq ($(wildcard /usr/include/pcap-bpf.h),)
-LIBS    += -lpcap
+LIBS    += -lusb -lusb-1.0 -lpcap -lpthread -lrt
 CFLAGS  += -DPPP_FILTER
 endif
 endif
@@ -200,7 +200,7 @@ all: $(TARGETS)
 install: pppd
 	mkdir -p $(BINDIR) $(MANDIR)
 	$(EXTRAINSTALL)
-	$(INSTALL) -s -c -m 555 pppd $(BINDIR)/pppd
+	$(INSTALL) -c -m 555 pppd $(BINDIR)/pppd
 	if chgrp pppusers $(BINDIR)/pppd 2>/dev/null; then \
 	  chmod o-rx,u+s $(BINDIR)/pppd; fi
 	$(INSTALL) -c -m 444 pppd.8 $(MANDIR)

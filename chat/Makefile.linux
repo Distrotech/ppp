@@ -1,8 +1,8 @@
 #	$Id: Makefile.linux,v 1.15 2006/06/04 05:07:46 paulus Exp $
 
-DESTDIR = $(INSTROOT)@DESTDIR@
-BINDIR = $(DESTDIR)/sbin
-MANDIR = $(DESTDIR)/share/man/man8
+DESTDIR2 = $(DESTDIR)@DESTDIR@
+BINDIR = $(DESTDIR2)/sbin
+MANDIR = $(DESTDIR2)/share/man/man8
 
 CDEF1=	-DTERMIOS			# Use the termios structure
 CDEF2=	-DSIGTYPE=void			# Standard definition
@@ -25,7 +25,7 @@ chat.o:	chat.c
 
 install: chat
 	mkdir -p $(BINDIR) $(MANDIR)
-	$(INSTALL) -s -c chat $(BINDIR)
+	$(INSTALL) -c chat $(BINDIR)
 	$(INSTALL) -c -m 644 chat.8 $(MANDIR)
 
 clean:
